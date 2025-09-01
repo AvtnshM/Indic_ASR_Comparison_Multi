@@ -12,10 +12,10 @@ from transformers import (
 from jiwer import wer, cer
 
 # -----------------------------
-# Load sample dataset (Hindi)
+# Load sample dataset (Hindi, Common Voice 17.0)
 # -----------------------------
-# We’ll use a few samples for faster CPU benchmarking
-test_ds = load_dataset("mozilla-foundation/common_voice_11_0", "hi", split="test[:3]")
+# Use just 3 samples for faster CPU benchmarking
+test_ds = load_dataset("mozilla-foundation/common_voice_17_0", "hi", split="test[:3]")
 
 # -----------------------------
 # Model configs
@@ -45,12 +45,23 @@ def evaluate_model(name, cfg, dataset):
     if cfg["type"] == "whisper":
         processor = WhisperProcessor.from_pretrained(cfg["id"])
         model = WhisperForConditionalGeneration.from_pretrained(cfg["id"]).to("cpu")
-        pipe = pipeline("automatic-speech-recognition", model=model, tokenizer=processor.tokenizer, feature_extractor=processor.feature_extractor, device=-1)
-
+        pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model,
+            tokenizer=processor.tokenizer,
+            feature_extractor=processor.feature_extractor,
+            device=-1,
+        )
     else:  # Conformer (Indic or MMS)
         processor = AutoProcessor.from_pretrained(cfg["id"], trust_remote_code=True)
         model = AutoModelForCTC.from_pretrained(cfg["id"], trust_remote_code=True).to("cpu")
-        pipe = pipeline("automatic-speech-recognition", model=model, tokenizer=processor.tokenizer, feature_extractor=processor.feature_extractor, device=-1)
+        pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model,
+            tokenizer=processor.tokenizer,
+            feature_extractor=processor.feature_extractor,
+            device=-1,
+        )
 
     preds, refs = [], []
     for sample in dataset:
