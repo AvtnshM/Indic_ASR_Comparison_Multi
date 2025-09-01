@@ -2,37 +2,30 @@ import gradio as gr
 import torch
 import torchaudio
 from transformers import (
+    AutoModelForCTC,
     AutoModelForSpeechSeq2Seq,
     AutoProcessor,
-    AutoModelForCTC,
     AutoModel,
 )
-import librosa
-import numpy as np
-from jiwer import wer, cer
-import time
 
+# -------------------------------
 # Model configurations
+# -------------------------------
 MODEL_CONFIGS = {
-    "AudioX-North (Jivi AI)": {
-        "repo": "jiviai/audioX-north-v1",
+    "Whisper Small (hi)": {
+        "repo": "openai/whisper-small",
         "model_type": "seq2seq",
-        "description": "Supports Hindi, Gujarati, Marathi",
     },
-    "IndicConformer (AI4Bharat)": {
+    "IndicConformer 600M": {
         "repo": "ai4bharat/indic-conformer-600m-multilingual",
-        "model_type": "ctc_rnnt",
-        "description": "Supports 22 Indian languages",
+        "model_type": "ctc",  # but handled specially
         "trust_remote_code": True,
-    },
-    "MMS (Facebook)": {
-        "repo": "facebook/mms-1b-all",  # fixed repo
-        "model_type": "ctc",
-        "description": "Supports over 1,400 languages (fine-tuning recommended)",
     },
 }
 
+# -------------------------------
 # Load model and processor
+# -------------------------------
 def load_model_and_processor(model_name):
     config = MODEL_CONFIGS[model_name]
     repo = config["repo"]
@@ -40,134 +33,89 @@ def load_model_and_processor(model_name):
     trust_remote_code = config.get("trust_remote_code", False)
 
     try:
-        if model_name == "IndicConformer (AI4Bharat)":
+        if "indic-conformer" in repo.lower():
             model = AutoModel.from_pretrained(repo, trust_remote_code=True)
-            processor = AutoProcessor.from_pretrained(repo, trust_remote_code=True)
-        elif model_name == "MMS (Facebook)":
-            model = AutoModelForCTC.from_pretrained(repo)
-            processor = AutoProcessor.from_pretrained(repo)
-        else:  # AudioX-North
-            processor = AutoProcessor.from_pretrained(
-                repo, trust_remote_code=trust_remote_code
-            )
+            processor = None  # Not required
+            return model, processor, model_type
+        else:
+            processor = AutoProcessor.from_pretrained(repo, trust_remote_code=trust_remote_code)
             if model_type == "seq2seq":
-                model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                    repo, trust_remote_code=trust_remote_code
-                )
+                model = AutoModelForSpeechSeq2Seq.from_pretrained(repo, trust_remote_code=trust_remote_code)
             else:
-                model = AutoModelForCTC.from_pretrained(
-                    repo, trust_remote_code=trust_remote_code
-                )
-
-        return model, processor, model_type
+                model = AutoModelForCTC.from_pretrained(repo, trust_remote_code=trust_remote_code)
+            return model, processor, model_type
     except Exception as e:
         return None, None, f"Error loading model: {str(e)}"
 
-
-# Compute metrics (WER, CER, RTF)
-def compute_metrics(reference, hypothesis, audio_duration):
-    if not reference or not hypothesis:
-        return None, None, None
-    try:
-        reference = reference.strip().lower()
-        hypothesis = hypothesis.strip().lower()
-        wer_score = wer(reference, hypothesis)
-        cer_score = cer(reference, hypothesis)
-        rtf = (
-            (time.time() - start_time) / audio_duration
-            if "start_time" in globals()
-            else None
-        )
-        return wer_score, cer_score, rtf
-    except Exception:
-        return None, None, None
-
-
-# Main transcription function
-def transcribe_audio(audio_file, model_name, reference_text=""):
-    if not audio_file:
-        return "Please upload an audio file.", "", "", ""
-
-    # Load model and processor
+# -------------------------------
+# Transcription
+# -------------------------------
+def transcribe_audio(audio_file, model_name, reference_text):
     model, processor, model_type = load_model_and_processor(model_name)
-    if isinstance(model_type, str) and model_type.startswith("Error"):
-        return model_type, "", "", ""
+    if model is None:
+        return f"⚠️ Failed to load {model_name}: {processor}", ""
 
-    try:
-        # Load and preprocess audio
-        audio, sr = librosa.load(audio_file, sr=16000)
-        audio_duration = len(audio) / sr
+    # Load audio
+    speech_array, sampling_rate = torchaudio.load(audio_file)
+    if sampling_rate != 16000:
+        speech_array = torchaudio.transforms.Resample(sampling_rate, 16000)(speech_array)
+    speech_array = speech_array.squeeze().numpy()
 
-        inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
-
-        global start_time
-        start_time = time.time()
-
+    # Special handling for IndicConformer
+    if "indic-conformer" in MODEL_CONFIGS[model_name]["repo"].lower():
+        with torch.no_grad():
+            transcription = model(torch.tensor(speech_array).unsqueeze(0), "hi", "ctc")
+        transcription = transcription[0] if isinstance(transcription, list) else transcription
+    else:
+        inputs = processor(speech_array, sampling_rate=16000, return_tensors="pt")
         with torch.no_grad():
             if model_type == "seq2seq":
-                input_features = inputs["input_features"]
-                outputs = model.generate(input_features)
-                transcription = processor.batch_decode(
-                    outputs, skip_special_tokens=True
-                )[0]
-            else:  # CTC or RNNT
-                input_values = inputs["input_values"]
-                logits = model(input_values).logits
-                predicted_ids = torch.argmax(logits, dim=-1)
-                transcription = processor.batch_decode(
-                    predicted_ids, skip_special_tokens=True
-                )[0]
+                generated_ids = model.generate(inputs["input_features"])
+                transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            else:
+                logits = model(**inputs).logits
+                pred_ids = torch.argmax(logits, dim=-1)
+                transcription = processor.batch_decode(pred_ids)[0]
 
-        # Compute metrics
-        wer_score, cer_score, rtf = "", "", ""
-        if reference_text and transcription:
-            wer_score, cer_score, rtf = compute_metrics(
-                reference_text, transcription, audio_duration
-            )
-            if wer_score is None:
-                wer_score = ""
-            if cer_score is None:
-                cer_score = ""
-            if rtf is None:
-                rtf = ""
+    # Compute WER if reference given
+    wer_score = None
+    if reference_text.strip():
+        from jiwer import wer
+        wer_score = wer(reference_text, transcription)
 
-        return transcription, str(wer_score), str(cer_score), str(rtf)
-    except Exception as e:
-        return f"Error during transcription: {str(e)}", "", "", ""
+    result = f"📝 Transcription: {transcription}"
+    if wer_score is not None:
+        result += f"\n📊 WER vs reference: {wer_score:.2%}"
 
+    return result, transcription
 
-# Gradio interface
-def create_interface():
-    model_choices = list(MODEL_CONFIGS.keys())
-    return gr.Interface(
-        fn=transcribe_audio,
-        inputs=[
-            gr.Audio(
-                type="filepath", label="Upload Audio File (16kHz recommended)"
-            ),
-            gr.Dropdown(
-                choices=model_choices,
-                label="Select Model",
-                value=model_choices[0],
-            ),
-            gr.Textbox(
-                label="Reference Text (Optional for WER/CER)",
-                placeholder="Enter or paste ground truth text here",
-                lines=3,
-            ),
-        ],
-        outputs=[
-            gr.Textbox(label="Transcription", show_copy_button=True),
-            gr.Textbox(label="WER"),
-            gr.Textbox(label="CER"),
-            gr.Textbox(label="RTF"),
-        ],
-        title="Multilingual Speech-to-Text with Metrics",
-        description="Upload an audio file, select a model, and optionally provide reference text to compute WER, CER, and RTF.",
-        allow_flagging="never",
+# -------------------------------
+# Gradio UI
+# -------------------------------
+with gr.Blocks() as demo:
+    gr.Markdown("## 🎙️ Indic ASR Comparison App")
+
+    with gr.Row():
+        audio_input = gr.Audio(sources=["upload", "microphone"], type="filepath", label="Upload or Record Audio")
+        model_dropdown = gr.Dropdown(choices=list(MODEL_CONFIGS.keys()), value="Whisper Small (hi)", label="Select Model")
+
+    # ✅ Paste enabled in textbox
+    reference_text = gr.Textbox(
+        label="Reference Text (optional, paste supported)",
+        placeholder="Paste reference transcription here...",
+        lines=4,
+        interactive=True
     )
 
+    transcribe_btn = gr.Button("Transcribe")
+    output_result = gr.Textbox(label="Result", lines=6)
+    raw_transcription = gr.Textbox(label="Raw Transcription", lines=4)
+
+    transcribe_btn.click(
+        fn=transcribe_audio,
+        inputs=[audio_input, model_dropdown, reference_text],
+        outputs=[output_result, raw_transcription]
+    )
 
 if __name__ == "__main__":
-    iface = create_interface()
-    iface.launch()
+    demo.launch()
