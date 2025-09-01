@@ -1,76 +1,95 @@
 import os
 import time
-import evaluate
-import pandas as pd
+import torch
+import gradio as gr
 from datasets import load_dataset
-from transformers import pipeline, AutoProcessor, AutoModelForCTC
+from transformers import pipeline
+import evaluate
 
-# Get HF token from secret (for gated repos like Jivi)
+# Get token for gated repos
 hf_token = os.getenv("HF_TOKEN")
 
-# Load Hindi dataset (tiny sample for speed)
-test_ds = load_dataset("mozilla-foundation/common_voice_11_0_hi", split="test[:3]")
+# Load Hindi audio samples (Common Voice Hindi test subset)
+test_ds = load_dataset(
+    "mozilla-foundation/common_voice_11_0",
+    "hi",
+    split="test[:3]",
+    use_auth_token=hf_token,
+)
+
+# Prepare references and audio arrays
+refs = [sample["sentence"] for sample in test_ds]
+audio_samples = [sample["audio"]["array"] for sample in test_ds]
 
 # Metrics
 wer_metric = evaluate.load("wer")
 cer_metric = evaluate.load("cer")
 
-# Models to compare
-models = {
-    "IndicConformer (AI4Bharat)": "ai4bharat/IndicConformer-hi",
-    "AudioX-North (Jivi AI)": "jiviai/audioX-north-v1",
-    "MMS (Facebook)": "facebook/mms-1b-all"
+# Models to test
+MODELS = {
+    "IndicConformer (AI4Bharat)": {
+        "model_id": "ai4bharat/indic-conformer-600m-multilingual",
+        "trust_remote_code": True,
+        "auth": None
+    },
+    "AudioX-North (Jivi AI)": {
+        "model_id": "jiviai/audioX-north-v1",
+        "trust_remote_code": False,
+        "auth": hf_token
+    },
+    "MMS (Facebook)": {
+        "model_id": "facebook/mms-1b-all",
+        "trust_remote_code": False,
+        "auth": None
+    }
 }
 
-results = []
+def eval_model(model_info):
+    args = {
+        "model": model_info["model_id"],
+        "device": -1  # CPU only
+    }
+    if model_info["trust_remote_code"]:
+        args["trust_remote_code"] = True
+    if model_info["auth"]:
+        args["use_auth_token"] = model_info["auth"]
 
-for model_name, model_id in models.items():
-    print(f"\n🔹 Running {model_name} ...")
-    try:
-        # Init pipeline
-        asr = pipeline(
-            "automatic-speech-recognition",
-            model=model_id,
-            tokenizer=model_id,
-            feature_extractor=model_id,
-            use_auth_token=hf_token if "jiviai" in model_id else None
-        )
+    asr = pipeline("automatic-speech-recognition", **args)
+    preds = []
+    start = time.time()
+    for audio in audio_samples:
+        out = asr(audio)
+        preds.append(out["text"].strip())
+    elapsed = time.time() - start
 
-        # Test loop
-        for sample in test_ds:
-            audio = sample["audio"]["array"]
-            ref_text = sample["sentence"]
+    total_len = sum(len(a) for a in audio_samples) / 16000
+    rtf = elapsed / total_len
 
-            start_time = time.time()
-            pred_text = asr(audio)["text"]
-            elapsed = time.time() - start_time
+    return {
+        "WER": wer_metric.compute(predictions=preds, references=refs),
+        "CER": cer_metric.compute(predictions=preds, references=refs),
+        "RTF": rtf
+    }
 
-            # Metrics
-            wer = wer_metric.compute(predictions=[pred_text], references=[ref_text])
-            cer = cer_metric.compute(predictions=[pred_text], references=[ref_text])
-            rtf = elapsed / (len(audio) / 16000)  # real-time factor (audio length at 16kHz)
+def run_all():
+    rows = []
+    for name, cfg in MODELS.items():
+        try:
+            res = eval_model(cfg)
+            rows.append([name, f"{res['WER']:.3f}", f"{res['CER']:.3f}", f"{res['RTF']:.2f}"])
+        except Exception as e:
+            rows.append([name, "Error", "Error", "Error"])
+    return rows
 
-            results.append({
-                "Model": model_name,
-                "Reference": ref_text,
-                "Prediction": pred_text,
-                "WER": round(wer, 3),
-                "CER": round(cer, 3),
-                "RTF": round(rtf, 3)
-            })
+with gr.Blocks() as demo:
+    gr.Markdown("### ASR Model Benchmark (Hindi Samples)\nWER, CER, and RTF comparison.")
+    btn = gr.Button("Run Benchmark")
+    table = gr.Dataframe(
+        headers=["Model", "WER", "CER", "RTF"],
+        datatype=["str", "str", "str", "str"],
+        interactive=False
+    )
+    btn.click(run_all, outputs=table)
 
-    except Exception as e:
-        results.append({
-            "Model": model_name,
-            "Reference": "-",
-            "Prediction": "-",
-            "WER": None,
-            "CER": None,
-            "RTF": None,
-            "Error": str(e)
-        })
-
-# Convert results to DataFrame
-df = pd.DataFrame(results)
-print("\n===== Final Comparison =====")
-print(df.to_string(index=False))
+if __name__ == "__main__":
+    demo.launch()
