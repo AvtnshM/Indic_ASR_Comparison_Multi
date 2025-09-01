@@ -1,12 +1,9 @@
 import time
 import os
 import evaluate
+import gradio as gr
 from datasets import load_dataset
-from huggingface_hub import login
-from transformers import pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
-
-# 🔑 Authenticate using HF_TOKEN secret
-login(token=os.environ.get("HF_TOKEN"))
+from transformers import pipeline
 
 # -----------------
 # Load evaluation metrics
@@ -15,14 +12,11 @@ cer_metric = evaluate.load("cer")
 
 # -----------------
 # Small sample dataset for Hindi
-# (free Spaces can't handle large test sets)
 test_ds = load_dataset("mozilla-foundation/common_voice_11_0", "hi", split="test[:3]")
 
 # Extract references + audio
 refs = [x["sentence"] for x in test_ds]
 audio_data = [x["audio"]["array"] for x in test_ds]
-
-results = {}
 
 # -----------------
 # Helper to evaluate model
@@ -45,7 +39,6 @@ def evaluate_model(model_name, pipeline_kwargs=None):
         rtf = (end - start) / sum(len(a) / 16000 for a in audio_data)
 
         return {
-            "Transcriptions": preds,
             "WER": wer_metric.compute(predictions=preds, references=refs),
             "CER": cer_metric.compute(predictions=preds, references=refs),
             "RTF": rtf
@@ -72,9 +65,23 @@ models = {
 }
 
 # -----------------
-# Run evaluations
-for label, cfg in models.items():
-    print(f"Running {label}...")
-    results[label] = evaluate_model(cfg["name"], cfg["pipeline_kwargs"])
+# Gradio interface
+def run_evaluations():
+    rows = []
+    for label, cfg in models.items():
+        res = evaluate_model(cfg["name"], cfg["pipeline_kwargs"])
+        if "Error" in res:
+            rows.append([label, res["Error"], "-", "-"])
+        else:
+            rows.append([label, f"{res['WER']:.3f}", f"{res['CER']:.3f}", f"{res['RTF']:.2f}"])
+    return rows
 
-print(results)
+with gr.Blocks() as demo:
+    gr.Markdown("## ASR Benchmark Comparison (Hindi Sample)\nEvaluating **WER, CER, RTF** across models.")
+    btn = gr.Button("Run Evaluation")
+    table = gr.Dataframe(headers=["Model", "WER", "CER", "RTF"], datatype=["str", "str", "str", "str"], interactive=False)
+
+    btn.click(fn=run_evaluations, outputs=table)
+
+if __name__ == "__main__":
+    demo.launch()
