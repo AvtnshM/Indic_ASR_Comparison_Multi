@@ -140,7 +140,7 @@ def create_interface():
         inputs=[
             gr.Audio(type="filepath", label="Upload Audio File (16kHz recommended)"),
             gr.CheckboxGroup(choices=model_choices, label="Select Models", value=model_choices),
-            gr.Textbox(label="Reference Text (Optional for WER/CER)", placeholder="Enter or paste ground truth text here", lines=3),
+            gr.Textbox(label="Reference Text (Optional for WER/CER)", placeholder="Enter or paste ground truth text here", lines=8, interactieve=True),
         ],
         outputs=gr.Markdown(label="Results"),
         title="Multilingual Speech-to-Text Benchmark",
