@@ -1,102 +1,81 @@
 import time
 import torch
 import gradio as gr
-from datasets import load_dataset
+import torchaudio
 from transformers import (
-    AutoProcessor,
-    AutoModelForCTC,
-    WhisperProcessor,
-    WhisperForConditionalGeneration,
-    pipeline,
+    WhisperProcessor, WhisperForConditionalGeneration,
+    AutoProcessor, AutoModelForCTC, pipeline
 )
 from jiwer import wer, cer
 
-# -----------------------------
-# Load sample dataset (Hindi, Common Voice 17.0)
-# -----------------------------
-# Use just 3 samples for faster CPU benchmarking
-test_ds = load_dataset("mozilla-foundation/common_voice_17_0", "hi", split="test[:3]")
+# Utility to load audio and resample to 16 kHz
+def load_audio(fp):
+    waveform, sr = torchaudio.load(fp)
+    if sr != 16000:
+        waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
+    return waveform.squeeze(0), 16000
 
-# -----------------------------
-# Model configs
-# -----------------------------
-models = {
-    "IndicWhisper (Hindi)": {
-        "id": "ai4bharat/indicwhisper-large-hi",
-        "type": "whisper",
-    },
-    "IndicConformer": {
-        "id": "ai4bharat/indic-conformer-600m-multilingual",
-        "type": "conformer",
-    },
-    "MMS (Facebook)": {
-        "id": "facebook/mms-1b-all",
-        "type": "conformer",
-    },
-}
-
-# -----------------------------
-# Helper function for inference
-# -----------------------------
-def evaluate_model(name, cfg, dataset):
-    print(f"\nRunning {name}...")
-    start_time = time.time()
+# Evaluation function
+def eval_model(name, cfg, file, ref):
+    waveform, sr = load_audio(file)
+    start = time.time()
 
     if cfg["type"] == "whisper":
-        processor = WhisperProcessor.from_pretrained(cfg["id"])
-        model = WhisperForConditionalGeneration.from_pretrained(cfg["id"]).to("cpu")
+        proc = WhisperProcessor.from_pretrained(cfg["id"])
+        model = WhisperForConditionalGeneration.from_pretrained(cfg["id"])
         pipe = pipeline(
             "automatic-speech-recognition",
             model=model,
-            tokenizer=processor.tokenizer,
-            feature_extractor=processor.feature_extractor,
-            device=-1,
+            tokenizer=proc.tokenizer,
+            feature_extractor=proc.feature_extractor,
+            device=-1
         )
-    else:  # Conformer (Indic or MMS)
-        processor = AutoProcessor.from_pretrained(cfg["id"], trust_remote_code=True)
-        model = AutoModelForCTC.from_pretrained(cfg["id"], trust_remote_code=True).to("cpu")
+    else:
+        proc = AutoProcessor.from_pretrained(cfg["id"], trust_remote_code=True)
+        model = AutoModelForCTC.from_pretrained(cfg["id"], trust_remote_code=True)
         pipe = pipeline(
             "automatic-speech-recognition",
             model=model,
-            tokenizer=processor.tokenizer,
-            feature_extractor=processor.feature_extractor,
-            device=-1,
+            tokenizer=proc.tokenizer,
+            feature_extractor=proc.feature_extractor,
+            device=-1
         )
 
-    preds, refs = [], []
-    for sample in dataset:
-        audio = sample["audio"]["array"]
-        ref_text = sample["sentence"]
-        out = pipe(audio)
-        preds.append(out["text"])
-        refs.append(ref_text)
+    result = pipe(waveform)
+    hyp = result["text"].lower()
+    w = wer(ref.lower() if ref else "", hyp) if ref else None
+    c = cer(ref.lower() if ref else "", hyp) if ref else None
+    rtf = (time.time() - start) / (waveform.shape[0] / sr)
 
-    elapsed = time.time() - start_time
-    rtf = elapsed / sum(len(s["audio"]["array"]) / 16000 for s in dataset)
+    return {"Transcription": hyp, "WER": w, "CER": c, "RTF": rtf}
 
-    return {
-        "WER": wer(refs, preds),
-        "CER": cer(refs, preds),
-        "RTF": rtf,
-        "Predictions": preds,
-        "References": refs,
-    }
+# Model configs
+MODELS = {
+    "IndicConformer (AI4Bharat)": {"id": "ai4bharat/indic-conformer-600m-multilingual", "type": "conformer"},
+    "AudioX-North (Jivi AI)": {"id": "jiviai/audioX-north-v1", "type": "whisper"},
+    "MMS (Facebook)": {"id": "facebook/mms-1b-all", "type": "conformer"},
+}
 
-# -----------------------------
-# Gradio UI
-# -----------------------------
-def run_comparison():
+# Gradio interface logic
+def compare_all(audio, reference, language):
     results = {}
-    for name, cfg in models.items():
-        results[name] = evaluate_model(name, cfg, test_ds)
+    for name, cfg in MODELS.items():
+        try:
+            results[name] = eval_model(name, cfg, audio, reference)
+        except Exception as e:
+            results[name] = {"Error": str(e)}
     return results
 
 demo = gr.Interface(
-    fn=run_comparison,
-    inputs=[],
-    outputs="json",
-    title="Indic ASR Benchmark (CPU)",
-    description="Compares IndicWhisper (Hindi), IndicConformer, and MMS on WER, CER, and RTF.",
+    fn=compare_all,
+    inputs=[
+        gr.Audio(type="filepath", label="Upload Audio (<=20s recommended)"),
+        gr.Textbox(label="Reference Transcript (optional)"),
+        gr.Dropdown(choices=["hi","gu","ta"], label="Language", value="hi")
+    ],
+    outputs=gr.JSON(label="Benchmark Results"),
+    title="Indic ASR Benchmark (CPU-only)",
+    description="Compare IndicConformer, AudioX-North, and MMS on WER, CER, and RTF."
 )
 
 if __name__ == "__main__":
