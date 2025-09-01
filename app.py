@@ -1,104 +1,91 @@
 import time
-import librosa
+import torch
 import gradio as gr
-from transformers import AutoModelForCTC, AutoProcessor, pipeline
+from datasets import load_dataset
+from transformers import (
+    AutoProcessor,
+    AutoModelForCTC,
+    WhisperProcessor,
+    WhisperForConditionalGeneration,
+    pipeline,
+)
 from jiwer import wer, cer
 
-# ---------------------------
-# Load Models (CPU only)
-# ---------------------------
+# -----------------------------
+# Load sample dataset (Hindi)
+# -----------------------------
+# We’ll use a few samples for faster CPU benchmarking
+test_ds = load_dataset("mozilla-foundation/common_voice_11_0", "hi", split="test[:3]")
 
-# 1. IndicConformer
-indic_model_id = "ai4bharat/indic-conformer-600m-multilingual"
-indic_processor = AutoProcessor.from_pretrained(indic_model_id)
-indic_model = AutoModelForCTC.from_pretrained(indic_model_id)
-indic_pipeline = pipeline(
-    "automatic-speech-recognition",
-    model=indic_model,
-    tokenizer=indic_processor.tokenizer,
-    feature_extractor=indic_processor.feature_extractor,
-    device=-1  # CPU
-)
+# -----------------------------
+# Model configs
+# -----------------------------
+models = {
+    "IndicWhisper (Hindi)": {
+        "id": "ai4bharat/indicwhisper-large-hi",
+        "type": "whisper",
+    },
+    "IndicConformer": {
+        "id": "ai4bharat/indic-conformer-600m-multilingual",
+        "type": "conformer",
+    },
+    "MMS (Facebook)": {
+        "id": "facebook/mms-1b-all",
+        "type": "conformer",
+    },
+}
 
-# 2. Facebook MMS (generic multilingual ASR)
-mms_model_id = "facebook/mms-1b-all"
-mms_processor = AutoProcessor.from_pretrained(mms_model_id)
-mms_model = AutoModelForCTC.from_pretrained(mms_model_id)
-mms_pipeline = pipeline(
-    "automatic-speech-recognition",
-    model=mms_model,
-    tokenizer=mms_processor.tokenizer,
-    feature_extractor=mms_processor.feature_extractor,
-    device=-1
-)
+# -----------------------------
+# Helper function for inference
+# -----------------------------
+def evaluate_model(name, cfg, dataset):
+    print(f"\nRunning {name}...")
+    start_time = time.time()
 
-# 3. Jivi AudioX (North example)
-jivi_model_id = "jiviai/audioX-north-v1"
-jivi_pipeline = pipeline(
-    "automatic-speech-recognition",
-    model=jivi_model_id,
-    device=-1
-)
+    if cfg["type"] == "whisper":
+        processor = WhisperProcessor.from_pretrained(cfg["id"])
+        model = WhisperForConditionalGeneration.from_pretrained(cfg["id"]).to("cpu")
+        pipe = pipeline("automatic-speech-recognition", model=model, tokenizer=processor.tokenizer, feature_extractor=processor.feature_extractor, device=-1)
 
-# ---------------------------
-# Utility Functions
-# ---------------------------
+    else:  # Conformer (Indic or MMS)
+        processor = AutoProcessor.from_pretrained(cfg["id"], trust_remote_code=True)
+        model = AutoModelForCTC.from_pretrained(cfg["id"], trust_remote_code=True).to("cpu")
+        pipe = pipeline("automatic-speech-recognition", model=model, tokenizer=processor.tokenizer, feature_extractor=processor.feature_extractor, device=-1)
 
-def evaluate_model(pipeline_fn, audio_path, reference_text):
-    # Load audio (resample to 16kHz for consistency)
-    speech, sr = librosa.load(audio_path, sr=16000)
+    preds, refs = [], []
+    for sample in dataset:
+        audio = sample["audio"]["array"]
+        ref_text = sample["sentence"]
+        out = pipe(audio)
+        preds.append(out["text"])
+        refs.append(ref_text)
 
-    # Measure runtime
-    start = time.time()
-    result = pipeline_fn(speech)
-    end = time.time()
+    elapsed = time.time() - start_time
+    rtf = elapsed / sum(len(s["audio"]["array"]) / 16000 for s in dataset)
 
-    # Extract transcription
-    hypothesis = result["text"]
+    return {
+        "WER": wer(refs, preds),
+        "CER": cer(refs, preds),
+        "RTF": rtf,
+        "Predictions": preds,
+        "References": refs,
+    }
 
-    # Compute metrics
-    word_error = wer(reference_text.lower(), hypothesis.lower())
-    char_error = cer(reference_text.lower(), hypothesis.lower())
-    rtf = (end - start) / (len(speech) / sr)  # real-time factor
-
-    return hypothesis, word_error, char_error, rtf
-
-def compare_models(audio, reference_text, lang="hi"):
-    results = {}
-
-    # IndicConformer
-    hyp, w, c, r = evaluate_model(indic_pipeline, audio, reference_text)
-    results["IndicConformer"] = (hyp, w, c, r)
-
-    # MMS
-    hyp, w, c, r = evaluate_model(mms_pipeline, audio, reference_text)
-    results["MMS"] = (hyp, w, c, r)
-
-    # Jivi
-    hyp, w, c, r = evaluate_model(jivi_pipeline, audio, reference_text)
-    results["Jivi"] = (hyp, w, c, r)
-
-    # Build results table
-    table = "| Model | Transcription | WER | CER | RTF |\n"
-    table += "|-------|---------------|-----|-----|-----|\n"
-    for model, (hyp, w, c, r) in results.items():
-        table += f"| {model} | {hyp} | {w:.3f} | {c:.3f} | {r:.3f} |\n"
-
-    return table
-
-# ---------------------------
+# -----------------------------
 # Gradio UI
-# ---------------------------
+# -----------------------------
+def run_comparison():
+    results = {}
+    for name, cfg in models.items():
+        results[name] = evaluate_model(name, cfg, test_ds)
+    return results
+
 demo = gr.Interface(
-    fn=compare_models,
-    inputs=[
-        gr.Audio(type="filepath", label="Upload Audio (≤20s recommended)"),
-        gr.Textbox(label="Reference Text"),
-        gr.Dropdown(choices=["hi", "gu", "ta"], value="hi", label="Language")
-    ],
-    outputs=gr.Markdown(label="Results"),
-    title="ASR Benchmark (CPU mode): IndicConformer vs MMS vs Jivi",
-    description="Runs on free CPU Spaces. Upload short audio and reference text. Compares models on WER, CER, and RTF."
+    fn=run_comparison,
+    inputs=[],
+    outputs="json",
+    title="Indic ASR Benchmark (CPU)",
+    description="Compares IndicWhisper (Hindi), IndicConformer, and MMS on WER, CER, and RTF.",
 )
 
 if __name__ == "__main__":
