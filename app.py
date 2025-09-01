@@ -17,7 +17,8 @@ MODEL_CONFIGS = {
     "IndicConformer (AI4Bharat)": {
         "repo": "ai4bharat/indic-conformer-600m-multilingual",
         "model_type": "ctc_rnnt",
-        "description": "Supports 22 Indian languages"
+        "description": "Supports 22 Indian languages",
+        "trust_remote_code": True
     },
     "MMS (Facebook)": {
         "repo": "facebook/mms-1b",
@@ -31,13 +32,14 @@ def load_model_and_processor(model_name):
     config = MODEL_CONFIGS[model_name]
     repo = config["repo"]
     model_type = config["model_type"]
+    trust_remote_code = config.get("trust_remote_code", False)
     
     try:
-        processor = AutoProcessor.from_pretrained(repo)
+        processor = AutoProcessor.from_pretrained(repo, trust_remote_code=trust_remote_code)
         if model_type == "seq2seq":
-            model = AutoModelForSpeechSeq2Seq.from_pretrained(repo)
+            model = AutoModelForSpeechSeq2Seq.from_pretrained(repo, trust_remote_code=trust_remote_code)
         else:  # ctc or ctc_rnnt
-            model = AutoModelForCTC.from_pretrained(repo)
+            model = AutoModelForCTC.from_pretrained(repo, trust_remote_code=trust_remote_code)
         return model, processor, model_type
     except Exception as e:
         return None, None, f"Error loading model: {str(e)}"
@@ -47,9 +49,12 @@ def compute_metrics(reference, hypothesis, audio_duration):
     if not reference or not hypothesis:
         return None, None, None
     try:
+        # Normalize text for better WER/CER calculation (e.g., remove extra spaces, handle numbers)
+        reference = reference.strip().replace(" ", "").lower()
+        hypothesis = hypothesis.strip().replace(" ", "").lower()
         wer_score = wer(reference, hypothesis)
         cer_score = cer(reference, hypothesis)
-        rtf = audio_duration / time.time()  # Simplified; actual RTF needs processing time
+        rtf = (time.time() - start_time) / audio_duration if 'start_time' in globals() else None
         return wer_score, cer_score, rtf
     except Exception as e:
         return None, None, f"Error computing metrics: {str(e)}"
@@ -73,6 +78,7 @@ def transcribe_audio(audio_file, model_name, reference_text=""):
         input_features = inputs["input_features"]
         
         # Measure processing time for RTF
+        global start_time
         start_time = time.time()
         with torch.no_grad():
             if model_type == "seq2seq":
@@ -87,10 +93,9 @@ def transcribe_audio(audio_file, model_name, reference_text=""):
         # Compute metrics if reference text is provided
         wer_score, cer_score, rtf = None, None, None
         if reference_text:
-            wer_score, cer_score, rtf_error = compute_metrics(reference_text, transcription, audio_duration)
-            if isinstance(rtf_error, str):
-                return transcription, wer_score, cer_score, rtf_error
-            rtf = (time.time() - start_time) / audio_duration  # Actual RTF
+            wer_score, cer_score, rtf = compute_metrics(reference_text, transcription, audio_duration)
+            if isinstance(rtf, str):
+                rtf = None  # Handle error case
         
         return transcription, wer_score, cer_score, rtf
     except Exception as e:
@@ -104,7 +109,7 @@ def create_interface():
         inputs=[
             gr.Audio(type="filepath", label="Upload Audio File (16kHz recommended)"),
             gr.Dropdown(choices=model_choices, label="Select Model", value=model_choices[0]),
-            gr.Textbox(label="Reference Text (Optional for WER/CER)", placeholder="Enter ground truth text here")
+            gr.Textbox(label="Reference Text (Optional for WER/CER)", placeholder="Enter or paste ground truth text here", lines=3)
         ],
         outputs=[
             gr.Textbox(label="Transcription"),
