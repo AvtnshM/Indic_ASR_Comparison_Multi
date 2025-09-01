@@ -6,3 +6,9 @@ soundfile>=0.10.0
 jiwer>=2.5.0
 gradio>=3.50.0
 numpy>=1.21.0
+
+
+datasets
+evaluate
+huggingface_hub
+onnxruntime
