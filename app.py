@@ -6,7 +6,7 @@ import numpy as np
 from jiwer import wer, cer
 from transformers import (
     WhisperProcessor, WhisperForConditionalGeneration,
-    Wav2Vec2Processor, Wav2Vec2ForCTC
+    AutoProcessor, AutoModelForCTC
 )
 
 # Global variables for models (loaded once)
@@ -16,73 +16,46 @@ conformer_processor = None
 conformer_model = None
 
 def load_models():
-    """Load models once at startup with error handling"""
+    """Load models once at startup"""
     global whisper_processor, whisper_model, conformer_processor, conformer_model
     
     if whisper_processor is None:
-        try:
-            print("Loading IndicWhisper...")
-            # Try the original model first
-            whisper_processor = WhisperProcessor.from_pretrained("openai/whisper-medium")
-            whisper_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-medium")
-            print("✅ Using OpenAI Whisper-medium as fallback")
-        except Exception as e:
-            print(f"❌ Error loading IndicWhisper: {e}")
-            # Fallback to standard Whisper
-            whisper_processor = WhisperProcessor.from_pretrained("openai/whisper-base")
-            whisper_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-base")
-            print("✅ Using OpenAI Whisper-base as fallback")
+        print("Loading IndicWhisper...")
+        whisper_processor = WhisperProcessor.from_pretrained("parthiv11/indic_whisper_nodcil")
+        whisper_model = WhisperForConditionalGeneration.from_pretrained("parthiv11/indic_whisper_nodcil")
         
-        try:
-            print("Loading IndicConformer...")
-            conformer_processor = Wav2Vec2Processor.from_pretrained("ai4bharat/indic-conformer-600m-multilingual")
-            conformer_model = Wav2Vec2ForCTC.from_pretrained("ai4bharat/indic-conformer-600m-multilingual")
-            print("✅ IndicConformer loaded successfully")
-        except Exception as e:
-            print(f"❌ Error loading IndicConformer: {e}")
-            # Fallback to a working multilingual model
-            conformer_processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-large-xlsr-53")
-            conformer_model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-large-xlsr-53")
-            print("✅ Using Facebook XLSR-53 as fallback")
+        print("Loading IndicConformer...")
+        conformer_processor = AutoProcessor.from_pretrained("ai4bharat/indicconformer_asr_conformer_multilingual")
+        conformer_model = AutoModelForCTC.from_pretrained("ai4bharat/indicconformer_asr_conformer_multilingual")
         
         print("Models loaded successfully!")
 
 def transcribe_whisper(audio_path):
-    """Transcribe using Whisper model"""
-    try:
-        audio, sr = librosa.load(audio_path, sr=16000)
-        input_features = whisper_processor(audio, sampling_rate=sr, return_tensors="pt").input_features
-        
-        start_time = time.time()
-        with torch.no_grad():
-            # Force Hindi language for better results
-            predicted_ids = whisper_model.generate(
-                input_features,
-                forced_decoder_ids=whisper_processor.get_decoder_prompt_ids(language="hindi", task="transcribe")
-            )
-        end_time = time.time()
-        
-        transcription = whisper_processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
-        return transcription, end_time - start_time
-    except Exception as e:
-        return f"Error in Whisper transcription: {str(e)}", 0
+    """Transcribe using IndicWhisper"""
+    audio, sr = librosa.load(audio_path, sr=16000)
+    input_features = whisper_processor(audio, sampling_rate=sr, return_tensors="pt").input_features
+    
+    start_time = time.time()
+    with torch.no_grad():
+        predicted_ids = whisper_model.generate(input_features)
+    end_time = time.time()
+    
+    transcription = whisper_processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
+    return transcription, end_time - start_time
 
 def transcribe_conformer(audio_path):
-    """Transcribe using Conformer model"""
-    try:
-        audio, sr = librosa.load(audio_path, sr=16000)
-        input_values = conformer_processor(audio, sampling_rate=sr, return_tensors="pt").input_values
-        
-        start_time = time.time()
-        with torch.no_grad():
-            logits = conformer_model(input_values).logits
-        predicted_ids = torch.argmax(logits, dim=-1)
-        end_time = time.time()
-        
-        transcription = conformer_processor.batch_decode(predicted_ids)[0]
-        return transcription, end_time - start_time
-    except Exception as e:
-        return f"Error in Conformer transcription: {str(e)}", 0
+    """Transcribe using IndicConformer"""
+    audio, sr = librosa.load(audio_path, sr=16000)
+    input_values = conformer_processor(audio, sampling_rate=sr, return_tensors="pt").input_values
+    
+    start_time = time.time()
+    with torch.no_grad():
+        logits = conformer_model(input_values).logits
+    predicted_ids = torch.argmax(logits, dim=-1)
+    end_time = time.time()
+    
+    transcription = conformer_processor.batch_decode(predicted_ids)[0]
+    return transcription, end_time - start_time
 
 def compare_models(audio_file, ground_truth_text):
     """Main comparison function for Gradio interface"""
@@ -113,7 +86,7 @@ def compare_models(audio_file, ground_truth_text):
             
             # Format results with metrics
             whisper_result = f"""
-## 📊 Whisper Results:
+## 📊 IndicWhisper Results:
 **Prediction:** {whisper_pred}
 
 **WER:** {whisper_wer:.3f}  
@@ -133,9 +106,9 @@ def compare_models(audio_file, ground_truth_text):
 """
             
             # Winner analysis
-            wer_winner = "Whisper" if whisper_wer < conformer_wer else "IndicConformer"
-            cer_winner = "Whisper" if whisper_cer < conformer_cer else "IndicConformer"
-            rtf_winner = "Whisper" if whisper_rtf < conformer_rtf else "IndicConformer"
+            wer_winner = "IndicWhisper" if whisper_wer < conformer_wer else "IndicConformer"
+            cer_winner = "IndicWhisper" if whisper_cer < conformer_cer else "IndicConformer"
+            rtf_winner = "IndicWhisper" if whisper_rtf < conformer_rtf else "IndicConformer"
             
             winner_analysis = f"""
 ## 🏆 Winner Analysis:
@@ -146,7 +119,7 @@ def compare_models(audio_file, ground_truth_text):
         else:
             # Results without metrics (no ground truth)
             whisper_result = f"""
-## 📊 Whisper Results:
+## 📊 IndicWhisper Results:
 **Prediction:** {whisper_pred}
 
 **RTF:** {whisper_rtf:.3f}  
@@ -163,7 +136,7 @@ def compare_models(audio_file, ground_truth_text):
             
             winner_analysis = f"""
 ## 🏆 Speed Comparison:
-**Faster Model:** {'Whisper' if whisper_rtf < conformer_rtf else 'IndicConformer'}  
+**Faster Model:** {'IndicWhisper' if whisper_rtf < conformer_rtf else 'IndicConformer'}  
 **RTF Difference:** {abs(whisper_rtf - conformer_rtf):.3f}
 """
         
@@ -177,17 +150,15 @@ def compare_models(audio_file, ground_truth_text):
 with gr.Blocks(title="ASR Model Comparison") as demo:
     
     gr.Markdown("""
-    # 🎤 ASR Model Comparison: Whisper vs IndicConformer
+    # 🎤 ASR Model Comparison: IndicWhisper vs IndicConformer
     
-    Compare **OpenAI Whisper** vs **AI4Bharat IndicConformer** on your audio files!
+    Compare two leading Indian language ASR models on your audio files!
     
     **Models:**
-    - **Whisper:** `openai/whisper-medium` (with Hindi language setting)
-    - **IndicConformer:** `ai4bharat/indic-conformer-600m-multilingual`
+    - **IndicWhisper:** `parthiv11/indic_whisper_nodcil`
+    - **IndicConformer:** `ai4bharat/indicconformer_asr_conformer_multilingual`
     
     **Metrics:** WER (Word Error Rate), CER (Character Error Rate), RTF (Real-Time Factor)
-    
-    ⚠️ **Note:** Using standard Whisper model with Hindi language setting for comparison.
     """)
     
     with gr.Row():
@@ -201,7 +172,7 @@ with gr.Blocks(title="ASR Model Comparison") as demo:
                 placeholder="Enter expected transcription for WER/CER calculation...",
                 lines=3
             )
-            compare_btn = gr.Button("🚀 Compare Models", variant="primary", size="lg")
+            compare_btn = gr.Button("🚀 Compare Models", variant="primary")
         
         with gr.Column():
             audio_info = gr.Textbox(label="ℹ️ Audio Info", interactive=False)
