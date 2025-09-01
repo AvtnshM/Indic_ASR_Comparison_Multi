@@ -227,10 +227,12 @@ def create_interface():
                 with gr.Group():
                     gr.Markdown("### Reference Text (Optional for WER/CER)")
                     reference_input = gr.Textbox(
-                        placeholder="Enter or paste ground truth text here...",
-                        lines=8,
-                        interactive=True,
+                        label="Reference Text (optional, paste supported)",
+                        placeholder="Paste reference transcription here...",
+                        lines=4,
+                        interactive=True
                     )
+                    
             
                     
                         
