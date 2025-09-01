@@ -1,87 +1,76 @@
-import time
 import os
+import time
 import evaluate
-import gradio as gr
+import pandas as pd
 from datasets import load_dataset
-from transformers import pipeline
+from transformers import pipeline, AutoProcessor, AutoModelForCTC
 
-# -----------------
-# Load evaluation metrics
+# Get HF token from secret (for gated repos like Jivi)
+hf_token = os.getenv("HF_TOKEN")
+
+# Load Hindi dataset (tiny sample for speed)
+test_ds = load_dataset("mozilla-foundation/common_voice_11_0_hi", split="test[:3]")
+
+# Metrics
 wer_metric = evaluate.load("wer")
 cer_metric = evaluate.load("cer")
 
-# -----------------
-# Small sample dataset for Hindi
-test_ds = load_dataset("mozilla-foundation/common_voice_11_0", "hi", split="test[:3]")
-
-# Extract references + audio
-refs = [x["sentence"] for x in test_ds]
-audio_data = [x["audio"]["array"] for x in test_ds]
-
-# -----------------
-# Helper to evaluate model
-def evaluate_model(model_name, pipeline_kwargs=None):
-    try:
-        start = time.time()
-        asr_pipeline = pipeline(
-            "automatic-speech-recognition",
-            model=model_name,
-            device=-1,  # CPU only
-            **(pipeline_kwargs or {})
-        )
-
-        preds = []
-        for audio in audio_data:
-            out = asr_pipeline(audio, chunk_length_s=30, return_timestamps=False)
-            preds.append(out["text"])
-
-        end = time.time()
-        rtf = (end - start) / sum(len(a) / 16000 for a in audio_data)
-
-        return {
-            "WER": wer_metric.compute(predictions=preds, references=refs),
-            "CER": cer_metric.compute(predictions=preds, references=refs),
-            "RTF": rtf
-        }
-
-    except Exception as e:
-        return {"Error": str(e)}
-
-# -----------------
-# Models to test
+# Models to compare
 models = {
-    "IndicConformer (AI4Bharat)": {
-        "name": "ai4bharat/IndicConformer-Hi",
-        "pipeline_kwargs": {"trust_remote_code": True}
-    },
-    "AudioX-North (Jivi AI)": {
-        "name": "jiviai/audioX-north-v1",
-        "pipeline_kwargs": {"use_auth_token": os.environ.get("HF_TOKEN")}
-    },
-    "MMS (Facebook)": {
-        "name": "facebook/mms-1b-all",
-        "pipeline_kwargs": {}
-    }
+    "IndicConformer (AI4Bharat)": "ai4bharat/IndicConformer-hi",
+    "AudioX-North (Jivi AI)": "jiviai/audioX-north-v1",
+    "MMS (Facebook)": "facebook/mms-1b-all"
 }
 
-# -----------------
-# Gradio interface
-def run_evaluations():
-    rows = []
-    for label, cfg in models.items():
-        res = evaluate_model(cfg["name"], cfg["pipeline_kwargs"])
-        if "Error" in res:
-            rows.append([label, res["Error"], "-", "-"])
-        else:
-            rows.append([label, f"{res['WER']:.3f}", f"{res['CER']:.3f}", f"{res['RTF']:.2f}"])
-    return rows
+results = []
 
-with gr.Blocks() as demo:
-    gr.Markdown("## ASR Benchmark Comparison (Hindi Sample)\nEvaluating **WER, CER, RTF** across models.")
-    btn = gr.Button("Run Evaluation")
-    table = gr.Dataframe(headers=["Model", "WER", "CER", "RTF"], datatype=["str", "str", "str", "str"], interactive=False)
+for model_name, model_id in models.items():
+    print(f"\n🔹 Running {model_name} ...")
+    try:
+        # Init pipeline
+        asr = pipeline(
+            "automatic-speech-recognition",
+            model=model_id,
+            tokenizer=model_id,
+            feature_extractor=model_id,
+            use_auth_token=hf_token if "jiviai" in model_id else None
+        )
 
-    btn.click(fn=run_evaluations, outputs=table)
+        # Test loop
+        for sample in test_ds:
+            audio = sample["audio"]["array"]
+            ref_text = sample["sentence"]
 
-if __name__ == "__main__":
-    demo.launch()
+            start_time = time.time()
+            pred_text = asr(audio)["text"]
+            elapsed = time.time() - start_time
+
+            # Metrics
+            wer = wer_metric.compute(predictions=[pred_text], references=[ref_text])
+            cer = cer_metric.compute(predictions=[pred_text], references=[ref_text])
+            rtf = elapsed / (len(audio) / 16000)  # real-time factor (audio length at 16kHz)
+
+            results.append({
+                "Model": model_name,
+                "Reference": ref_text,
+                "Prediction": pred_text,
+                "WER": round(wer, 3),
+                "CER": round(cer, 3),
+                "RTF": round(rtf, 3)
+            })
+
+    except Exception as e:
+        results.append({
+            "Model": model_name,
+            "Reference": "-",
+            "Prediction": "-",
+            "WER": None,
+            "CER": None,
+            "RTF": None,
+            "Error": str(e)
+        })
+
+# Convert results to DataFrame
+df = pd.DataFrame(results)
+print("\n===== Final Comparison =====")
+print(df.to_string(index=False))
