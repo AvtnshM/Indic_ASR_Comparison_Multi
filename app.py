@@ -57,7 +57,6 @@ def load_model_and_processor(model_name):
     except Exception as e:
         return None, None, f"Error loading model: {str(e)}"
 
-
 # Compute metrics (WER, CER, RTF)
 def compute_metrics(reference, hypothesis, audio_duration, total_time):
     if not reference or not hypothesis:
@@ -72,13 +71,15 @@ def compute_metrics(reference, hypothesis, audio_duration, total_time):
     except Exception:
         return None, None, None, None
 
-
 # Main transcription function
 def transcribe_audio(audio_file, selected_models, reference_text=""):
     if not audio_file:
-        return "Please upload an audio file."
+        return "Please upload an audio file.", []
+    
+    if not selected_models:
+        return "Please select at least one model.", []
 
-    results = []
+    table_data = []
     try:
         # Load and preprocess audio once
         audio, sr = librosa.load(audio_file, sr=16000)
@@ -87,7 +88,14 @@ def transcribe_audio(audio_file, selected_models, reference_text=""):
         for model_name in selected_models:
             model, processor, model_type = load_model_and_processor(model_name)
             if isinstance(model_type, str) and model_type.startswith("Error"):
-                results.append(f"{model_name}: {model_type}")
+                table_data.append([
+                    model_name,
+                    f"Error: {model_type}",
+                    "-",
+                    "-",
+                    "-",
+                    "-"
+                ])
                 continue
 
             inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
@@ -107,48 +115,101 @@ def transcribe_audio(audio_file, selected_models, reference_text=""):
             total_time = time.time() - start_time
 
             # Compute metrics
-            wer_score, cer_score, rtf, total_time_tracked = "", "", "", ""
+            wer_score, cer_score, rtf = "-", "-", "-"
             if reference_text and transcription:
-                wer_score, cer_score, rtf, total_time_tracked = compute_metrics(
+                wer_val, cer_val, rtf_val, _ = compute_metrics(
                     reference_text, transcription, audio_duration, total_time
                 )
-                wer_score = round(wer_score, 3) if wer_score is not None else ""
-                cer_score = round(cer_score, 3) if cer_score is not None else ""
-                rtf = round(rtf, 3) if rtf is not None else ""
-                total_time_tracked = round(total_time_tracked, 2) if total_time_tracked is not None else ""
+                wer_score = f"{wer_val:.3f}" if wer_val is not None else "-"
+                cer_score = f"{cer_val:.3f}" if cer_val is not None else "-"
+                rtf = f"{rtf_val:.3f}" if rtf_val is not None else "-"
 
-            result = (
-                f"### {model_name}\n"
-                f"- **Transcription:** {transcription}\n"
-                f"- **WER:** {wer_score}\n"
-                f"- **CER:** {cer_score}\n"
-                f"- **RTF:** {rtf}\n"
-                f"- **Time Taken (s):** {total_time_tracked}\n"
-            )
-            results.append(result)
+            # Add row to table
+            table_data.append([
+                model_name,
+                transcription,
+                wer_score,
+                cer_score,
+                rtf,
+                f"{total_time:.2f}s"
+            ])
 
-        return "\n\n".join(results)
+        # Create summary text
+        summary = f"**Audio Duration:** {audio_duration:.2f}s\n"
+        summary += f"**Models Tested:** {len(selected_models)}\n"
+        if reference_text:
+            summary += f"**Reference Text:** {reference_text[:100]}{'...' if len(reference_text) > 100 else ''}\n"
+        
+        return summary, table_data
     except Exception as e:
-        return f"Error during transcription: {str(e)}"
+        return f"Error during transcription: {str(e)}", []
 
-
-# Gradio interface
+# Create Gradio interface with blocks for better control
 def create_interface():
     model_choices = list(MODEL_CONFIGS.keys())
-    return gr.Interface(
-        fn=transcribe_audio,
-        inputs=[
-            gr.Audio(type="filepath", label="Upload Audio File (16kHz recommended)"),
-            gr.CheckboxGroup(choices=model_choices, label="Select Models", value=model_choices),
-            gr.Textbox(label="Reference Text (Optional for WER/CER)", placeholder="Enter or paste ground truth text here", lines=8, interactive=True),
-        ],
-        outputs=gr.Markdown(label="Results"),
-        title="Multilingual Speech-to-Text Benchmark",
-        description="Upload an audio file, select one or more models, and optionally provide reference text. The app benchmarks WER, CER, RTF, and Time Taken for each model.",
-        allow_flagging="never",
-    )
-
+    
+    with gr.Blocks(title="Multilingual Speech-to-Text Benchmark") as iface:
+        gr.Markdown("""
+        # Multilingual Speech-to-Text Benchmark
+        Upload an audio file, select one or more models, and optionally provide reference text. 
+        The app benchmarks WER, CER, RTF, and Time Taken for each model.
+        """)
+        
+        with gr.Row():
+            with gr.Column(scale=1):
+                audio_input = gr.Audio(
+                    label="Upload Audio File (16kHz recommended)", 
+                    type="filepath"
+                )
+                model_selection = gr.CheckboxGroup(
+                    choices=model_choices,
+                    label="Select Models",
+                    value=[model_choices[0]],  # Default to first model
+                    interactive=True
+                )
+                reference_input = gr.Textbox(
+                    label="Reference Text (Optional for WER/CER)",
+                    placeholder="Enter or paste ground truth text here",
+                    lines=8,
+                    interactive=True,
+                    max_lines=20
+                )
+                submit_btn = gr.Button("Transcribe", variant="primary", size="lg")
+            
+            with gr.Column(scale=2):
+                summary_output = gr.Markdown(label="Summary", value="Upload an audio file and select models to begin...")
+                
+                results_table = gr.Dataframe(
+                    headers=["Model", "Transcription", "WER", "CER", "RTF", "Time Taken"],
+                    datatype=["str", "str", "str", "str", "str", "str"],
+                    label="Results Comparison",
+                    interactive=False,
+                    wrap=True,
+                    column_widths=[150, 400, 80, 80, 80, 100]
+                )
+        
+        # Connect the function
+        submit_btn.click(
+            fn=transcribe_audio,
+            inputs=[audio_input, model_selection, reference_input],
+            outputs=[summary_output, results_table]
+        )
+        
+        # Also allow triggering on Enter in reference text
+        reference_input.submit(
+            fn=transcribe_audio,
+            inputs=[audio_input, model_selection, reference_input],
+            outputs=[summary_output, results_table]
+        )
+    
+    return iface
 
 if __name__ == "__main__":
     iface = create_interface()
-    iface.launch()
+    iface.launch(
+        share=False,
+        debug=True,
+        server_name="0.0.0.0",
+        server_port=7860,
+        show_error=True
+    )
