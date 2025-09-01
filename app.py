@@ -1,82 +1,80 @@
 import time
-import torch
-import gradio as gr
-import torchaudio
-from transformers import (
-    WhisperProcessor, WhisperForConditionalGeneration,
-    AutoProcessor, AutoModelForCTC, pipeline
-)
-from jiwer import wer, cer
+import os
+import evaluate
+from datasets import load_dataset
+from huggingface_hub import login
+from transformers import pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
 
-# Utility to load audio and resample to 16 kHz
-def load_audio(fp):
-    waveform, sr = torchaudio.load(fp)
-    if sr != 16000:
-        waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
-    return waveform.squeeze(0), 16000
+# 🔑 Authenticate using HF_TOKEN secret
+login(token=os.environ.get("HF_TOKEN"))
 
-# Evaluation function
-def eval_model(name, cfg, file, ref):
-    waveform, sr = load_audio(file)
-    start = time.time()
+# -----------------
+# Load evaluation metrics
+wer_metric = evaluate.load("wer")
+cer_metric = evaluate.load("cer")
 
-    if cfg["type"] == "whisper":
-        proc = WhisperProcessor.from_pretrained(cfg["id"])
-        model = WhisperForConditionalGeneration.from_pretrained(cfg["id"])
-        pipe = pipeline(
+# -----------------
+# Small sample dataset for Hindi
+# (free Spaces can't handle large test sets)
+test_ds = load_dataset("mozilla-foundation/common_voice_11_0", "hi", split="test[:3]")
+
+# Extract references + audio
+refs = [x["sentence"] for x in test_ds]
+audio_data = [x["audio"]["array"] for x in test_ds]
+
+results = {}
+
+# -----------------
+# Helper to evaluate model
+def evaluate_model(model_name, pipeline_kwargs=None):
+    try:
+        start = time.time()
+        asr_pipeline = pipeline(
             "automatic-speech-recognition",
-            model=model,
-            tokenizer=proc.tokenizer,
-            feature_extractor=proc.feature_extractor,
-            device=-1
-        )
-    else:
-        proc = AutoProcessor.from_pretrained(cfg["id"], trust_remote_code=True)
-        model = AutoModelForCTC.from_pretrained(cfg["id"], trust_remote_code=True)
-        pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model,
-            tokenizer=proc.tokenizer,
-            feature_extractor=proc.feature_extractor,
-            device=-1
+            model=model_name,
+            device=-1,  # CPU only
+            **(pipeline_kwargs or {})
         )
 
-    result = pipe(waveform)
-    hyp = result["text"].lower()
-    w = wer(ref.lower() if ref else "", hyp) if ref else None
-    c = cer(ref.lower() if ref else "", hyp) if ref else None
-    rtf = (time.time() - start) / (waveform.shape[0] / sr)
+        preds = []
+        for audio in audio_data:
+            out = asr_pipeline(audio, chunk_length_s=30, return_timestamps=False)
+            preds.append(out["text"])
 
-    return {"Transcription": hyp, "WER": w, "CER": c, "RTF": rtf}
+        end = time.time()
+        rtf = (end - start) / sum(len(a) / 16000 for a in audio_data)
 
-# Model configs
-MODELS = {
-    "IndicConformer (AI4Bharat)": {"id": "ai4bharat/indic-conformer-600m-multilingual", "type": "conformer"},
-    "AudioX-North (Jivi AI)": {"id": "jiviai/audioX-north-v1", "type": "whisper"},
-    "MMS (Facebook)": {"id": "facebook/mms-1b-all", "type": "conformer"},
+        return {
+            "Transcriptions": preds,
+            "WER": wer_metric.compute(predictions=preds, references=refs),
+            "CER": cer_metric.compute(predictions=preds, references=refs),
+            "RTF": rtf
+        }
+
+    except Exception as e:
+        return {"Error": str(e)}
+
+# -----------------
+# Models to test
+models = {
+    "IndicConformer (AI4Bharat)": {
+        "name": "ai4bharat/IndicConformer-Hi",
+        "pipeline_kwargs": {"trust_remote_code": True}
+    },
+    "AudioX-North (Jivi AI)": {
+        "name": "jiviai/audioX-north-v1",
+        "pipeline_kwargs": {"use_auth_token": os.environ.get("HF_TOKEN")}
+    },
+    "MMS (Facebook)": {
+        "name": "facebook/mms-1b-all",
+        "pipeline_kwargs": {}
+    }
 }
 
-# Gradio interface logic
-def compare_all(audio, reference, language):
-    results = {}
-    for name, cfg in MODELS.items():
-        try:
-            results[name] = eval_model(name, cfg, audio, reference)
-        except Exception as e:
-            results[name] = {"Error": str(e)}
-    return results
+# -----------------
+# Run evaluations
+for label, cfg in models.items():
+    print(f"Running {label}...")
+    results[label] = evaluate_model(cfg["name"], cfg["pipeline_kwargs"])
 
-demo = gr.Interface(
-    fn=compare_all,
-    inputs=[
-        gr.Audio(type="filepath", label="Upload Audio (<=20s recommended)"),
-        gr.Textbox(label="Reference Transcript (optional)"),
-        gr.Dropdown(choices=["hi","gu","ta"], label="Language", value="hi")
-    ],
-    outputs=gr.JSON(label="Benchmark Results"),
-    title="Indic ASR Benchmark (CPU-only)",
-    description="Compare IndicConformer, AudioX-North, and MMS on WER, CER, and RTF."
-)
-
-if __name__ == "__main__":
-    demo.launch()
+print(results)
