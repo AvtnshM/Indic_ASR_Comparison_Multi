@@ -229,11 +229,13 @@ def create_interface():
                     reference_input = gr.Textbox(
                         placeholder="Enter or paste ground truth text here...",
                         lines=8,
-                        max_lines=20,
-                        show_copy_button=True,
                         interactive=True,
-                        elem_classes="paste-area"
                     )
+            
+                    
+                        
+                        
+                    
                     
                 submit_btn = gr.Button("🚀 Transcribe", variant="primary", size="lg")
             
