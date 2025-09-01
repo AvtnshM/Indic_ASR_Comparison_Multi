@@ -1,219 +1,105 @@
-import gradio as gr
 import time
 import librosa
-import torch
-import numpy as np
+import gradio as gr
+from transformers import AutoModelForCTC, AutoProcessor, pipeline
 from jiwer import wer, cer
-from transformers import (
-    WhisperProcessor, WhisperForConditionalGeneration,
-    AutoProcessor, AutoModelForCTC
+
+# ---------------------------
+# Load Models (CPU only)
+# ---------------------------
+
+# 1. IndicConformer
+indic_model_id = "ai4bharat/indic-conformer-600m-multilingual"
+indic_processor = AutoProcessor.from_pretrained(indic_model_id)
+indic_model = AutoModelForCTC.from_pretrained(indic_model_id)
+indic_pipeline = pipeline(
+    "automatic-speech-recognition",
+    model=indic_model,
+    tokenizer=indic_processor.tokenizer,
+    feature_extractor=indic_processor.feature_extractor,
+    device=-1  # CPU
 )
 
-# Global variables for models (loaded once)
-whisper_processor = None
-whisper_model = None
-conformer_processor = None
-conformer_model = None
+# 2. Facebook MMS (generic multilingual ASR)
+mms_model_id = "facebook/mms-1b-all"
+mms_processor = AutoProcessor.from_pretrained(mms_model_id)
+mms_model = AutoModelForCTC.from_pretrained(mms_model_id)
+mms_pipeline = pipeline(
+    "automatic-speech-recognition",
+    model=mms_model,
+    tokenizer=mms_processor.tokenizer,
+    feature_extractor=mms_processor.feature_extractor,
+    device=-1
+)
 
-def load_models():
-    """Load models once at startup"""
-    global whisper_processor, whisper_model, conformer_processor, conformer_model
-    
-    if whisper_processor is None:
-        print("Loading IndicWhisper...")
-        whisper_processor = WhisperProcessor.from_pretrained("parthiv11/indic_whisper_nodcil")
-        whisper_model = WhisperForConditionalGeneration.from_pretrained("parthiv11/indic_whisper_nodcil")
-        
-        print("Loading IndicConformer...")
-        conformer_processor = AutoProcessor.from_pretrained("ai4bharat/indicconformer_asr_conformer_multilingual")
-        conformer_model = AutoModelForCTC.from_pretrained("ai4bharat/indicconformer_asr_conformer_multilingual")
-        
-        print("Models loaded successfully!")
+# 3. Jivi AudioX (North example)
+jivi_model_id = "jiviai/audioX-north-v1"
+jivi_pipeline = pipeline(
+    "automatic-speech-recognition",
+    model=jivi_model_id,
+    device=-1
+)
 
-def transcribe_whisper(audio_path):
-    """Transcribe using IndicWhisper"""
-    audio, sr = librosa.load(audio_path, sr=16000)
-    input_features = whisper_processor(audio, sampling_rate=sr, return_tensors="pt").input_features
-    
-    start_time = time.time()
-    with torch.no_grad():
-        predicted_ids = whisper_model.generate(input_features)
-    end_time = time.time()
-    
-    transcription = whisper_processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
-    return transcription, end_time - start_time
+# ---------------------------
+# Utility Functions
+# ---------------------------
 
-def transcribe_conformer(audio_path):
-    """Transcribe using IndicConformer"""
-    audio, sr = librosa.load(audio_path, sr=16000)
-    input_values = conformer_processor(audio, sampling_rate=sr, return_tensors="pt").input_values
-    
-    start_time = time.time()
-    with torch.no_grad():
-        logits = conformer_model(input_values).logits
-    predicted_ids = torch.argmax(logits, dim=-1)
-    end_time = time.time()
-    
-    transcription = conformer_processor.batch_decode(predicted_ids)[0]
-    return transcription, end_time - start_time
+def evaluate_model(pipeline_fn, audio_path, reference_text):
+    # Load audio (resample to 16kHz for consistency)
+    speech, sr = librosa.load(audio_path, sr=16000)
 
-def compare_models(audio_file, ground_truth_text):
-    """Main comparison function for Gradio interface"""
-    
-    if audio_file is None:
-        return "Please upload an audio file", "", "", "", "", ""
-    
-    load_models()  # Ensure models are loaded
-    
-    try:
-        # Get audio duration
-        audio_duration = librosa.get_duration(filename=audio_file)
-        
-        # Test IndicWhisper
-        whisper_pred, whisper_time = transcribe_whisper(audio_file)
-        whisper_rtf = whisper_time / audio_duration if audio_duration > 0 else 0
-        
-        # Test IndicConformer  
-        conformer_pred, conformer_time = transcribe_conformer(audio_file)
-        conformer_rtf = conformer_time / audio_duration if audio_duration > 0 else 0
-        
-        # Calculate metrics if ground truth provided
-        if ground_truth_text and ground_truth_text.strip():
-            whisper_wer = wer(ground_truth_text, whisper_pred)
-            whisper_cer = cer(ground_truth_text, whisper_pred)
-            conformer_wer = wer(ground_truth_text, conformer_pred)
-            conformer_cer = cer(ground_truth_text, conformer_pred)
-            
-            # Format results with metrics
-            whisper_result = f"""
-## 📊 IndicWhisper Results:
-**Prediction:** {whisper_pred}
+    # Measure runtime
+    start = time.time()
+    result = pipeline_fn(speech)
+    end = time.time()
 
-**WER:** {whisper_wer:.3f}  
-**CER:** {whisper_cer:.3f}  
-**RTF:** {whisper_rtf:.3f} {'✅ Real-time' if whisper_rtf < 1.0 else '⚠️ Slower'}  
-**Time:** {whisper_time:.2f}s
-"""
-            
-            conformer_result = f"""
-## 📊 IndicConformer Results:
-**Prediction:** {conformer_pred}
+    # Extract transcription
+    hypothesis = result["text"]
 
-**WER:** {conformer_wer:.3f}  
-**CER:** {conformer_cer:.3f}  
-**RTF:** {conformer_rtf:.3f} {'✅ Real-time' if conformer_rtf < 1.0 else '⚠️ Slower'}  
-**Time:** {conformer_time:.2f}s
-"""
-            
-            # Winner analysis
-            wer_winner = "IndicWhisper" if whisper_wer < conformer_wer else "IndicConformer"
-            cer_winner = "IndicWhisper" if whisper_cer < conformer_cer else "IndicConformer"
-            rtf_winner = "IndicWhisper" if whisper_rtf < conformer_rtf else "IndicConformer"
-            
-            winner_analysis = f"""
-## 🏆 Winner Analysis:
-**Best WER:** {wer_winner} ({min(whisper_wer, conformer_wer):.3f})  
-**Best CER:** {cer_winner} ({min(whisper_cer, conformer_cer):.3f})  
-**Fastest:** {rtf_winner} ({min(whisper_rtf, conformer_rtf):.3f})
-"""
-        else:
-            # Results without metrics (no ground truth)
-            whisper_result = f"""
-## 📊 IndicWhisper Results:
-**Prediction:** {whisper_pred}
+    # Compute metrics
+    word_error = wer(reference_text.lower(), hypothesis.lower())
+    char_error = cer(reference_text.lower(), hypothesis.lower())
+    rtf = (end - start) / (len(speech) / sr)  # real-time factor
 
-**RTF:** {whisper_rtf:.3f}  
-**Time:** {whisper_time:.2f}s
-"""
-            
-            conformer_result = f"""
-## 📊 IndicConformer Results:
-**Prediction:** {conformer_pred}
+    return hypothesis, word_error, char_error, rtf
 
-**RTF:** {conformer_rtf:.3f}  
-**Time:** {conformer_time:.2f}s
-"""
-            
-            winner_analysis = f"""
-## 🏆 Speed Comparison:
-**Faster Model:** {'IndicWhisper' if whisper_rtf < conformer_rtf else 'IndicConformer'}  
-**RTF Difference:** {abs(whisper_rtf - conformer_rtf):.3f}
-"""
-        
-        return whisper_result, conformer_result, winner_analysis, whisper_pred, conformer_pred, f"Audio duration: {audio_duration:.2f}s"
-        
-    except Exception as e:
-        error_msg = f"❌ Error processing audio: {str(e)}"
-        return error_msg, "", "", "", "", ""
+def compare_models(audio, reference_text, lang="hi"):
+    results = {}
 
-# Create Gradio Interface
-with gr.Blocks(title="ASR Model Comparison") as demo:
-    
-    gr.Markdown("""
-    # 🎤 ASR Model Comparison: IndicWhisper vs IndicConformer
-    
-    Compare two leading Indian language ASR models on your audio files!
-    
-    **Models:**
-    - **IndicWhisper:** `parthiv11/indic_whisper_nodcil`
-    - **IndicConformer:** `ai4bharat/indicconformer_asr_conformer_multilingual`
-    
-    **Metrics:** WER (Word Error Rate), CER (Character Error Rate), RTF (Real-Time Factor)
-    """)
-    
-    with gr.Row():
-        with gr.Column():
-            audio_input = gr.Audio(
-                label="🎵 Upload Audio File", 
-                type="filepath"
-            )
-            ground_truth_input = gr.Textbox(
-                label="📝 Ground Truth Text (Optional)", 
-                placeholder="Enter expected transcription for WER/CER calculation...",
-                lines=3
-            )
-            compare_btn = gr.Button("🚀 Compare Models", variant="primary")
-        
-        with gr.Column():
-            audio_info = gr.Textbox(label="ℹ️ Audio Info", interactive=False)
-    
-    with gr.Row():
-        with gr.Column():
-            whisper_output = gr.Markdown(label="IndicWhisper Results")
-        with gr.Column():
-            conformer_output = gr.Markdown(label="IndicConformer Results")
-    
-    winner_output = gr.Markdown(label="🏆 Comparison Summary")
-    
-    # Hidden outputs for API access
-    with gr.Row(visible=False):
-        whisper_text = gr.Textbox(label="Whisper Transcription")
-        conformer_text = gr.Textbox(label="Conformer Transcription")
-    
-    compare_btn.click(
-        fn=compare_models,
-        inputs=[audio_input, ground_truth_input],
-        outputs=[whisper_output, conformer_output, winner_output, whisper_text, conformer_text, audio_info]
-    )
-    
-    gr.Markdown("""
-    ## 📋 How to Use:
-    1. **Upload audio** in any supported format (WAV, MP3, M4A, etc.)
-    2. **Add ground truth** (optional) - if provided, you'll get WER/CER metrics
-    3. **Click Compare** to see results from both models
-    4. **Analyze** which model performs better for your use case
-    
-    ## 📖 Understanding Metrics:
-    - **WER (Word Error Rate):** Percentage of words transcribed incorrectly (Lower = Better, 0 = Perfect)
-    - **CER (Character Error Rate):** Percentage of characters transcribed incorrectly (Lower = Better, 0 = Perfect)
-    - **RTF (Real-Time Factor):** Ratio of processing time to audio duration (Lower = Faster, <1.0 = Real-time capable)
-    
-    ## 🌐 Supported Languages:
-    Bengali, Gujarati, Hindi, Kannada, Malayalam, Marathi, Odia, Punjabi, Sanskrit, Tamil, Telugu, Urdu
-    """)
+    # IndicConformer
+    hyp, w, c, r = evaluate_model(indic_pipeline, audio, reference_text)
+    results["IndicConformer"] = (hyp, w, c, r)
 
-# Load models on startup
-load_models()
+    # MMS
+    hyp, w, c, r = evaluate_model(mms_pipeline, audio, reference_text)
+    results["MMS"] = (hyp, w, c, r)
+
+    # Jivi
+    hyp, w, c, r = evaluate_model(jivi_pipeline, audio, reference_text)
+    results["Jivi"] = (hyp, w, c, r)
+
+    # Build results table
+    table = "| Model | Transcription | WER | CER | RTF |\n"
+    table += "|-------|---------------|-----|-----|-----|\n"
+    for model, (hyp, w, c, r) in results.items():
+        table += f"| {model} | {hyp} | {w:.3f} | {c:.3f} | {r:.3f} |\n"
+
+    return table
+
+# ---------------------------
+# Gradio UI
+# ---------------------------
+demo = gr.Interface(
+    fn=compare_models,
+    inputs=[
+        gr.Audio(type="filepath", label="Upload Audio (≤20s recommended)"),
+        gr.Textbox(label="Reference Text"),
+        gr.Dropdown(choices=["hi", "gu", "ta"], value="hi", label="Language")
+    ],
+    outputs=gr.Markdown(label="Results"),
+    title="ASR Benchmark (CPU mode): IndicConformer vs MMS vs Jivi",
+    description="Runs on free CPU Spaces. Upload short audio and reference text. Compares models on WER, CER, and RTF."
+)
 
 if __name__ == "__main__":
     demo.launch()
