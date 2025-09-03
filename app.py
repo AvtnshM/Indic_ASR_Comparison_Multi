@@ -8,7 +8,6 @@ from transformers import (
     AutoModel,
     WhisperProcessor,
     WhisperForConditionalGeneration,
-    pipeline,
 )
 import librosa
 import numpy as np
@@ -20,32 +19,32 @@ LANGUAGE_CONFIGS = {
     "Hindi (हिंदी)": {
         "code": "hi",
         "script": "Devanagari",
-        "models": ["AudioX-North", "IndicConformer", "MMS", "Shuka"]
+        "models": ["AudioX-North", "IndicConformer", "MMS"]
     },
     "Gujarati (ગુજરાતી)": {
         "code": "gu", 
         "script": "Gujarati",
-        "models": ["AudioX-North", "IndicConformer", "MMS", "Shuka"]
+        "models": ["AudioX-North", "IndicConformer", "MMS"]
     },
     "Marathi (मराठी)": {
         "code": "mr",
         "script": "Devanagari", 
-        "models": ["AudioX-North", "IndicConformer", "MMS", "Shuka"]
+        "models": ["AudioX-North", "IndicConformer", "MMS"]
     },
     "Tamil (தமிழ்)": {
         "code": "ta",
         "script": "Tamil",
-        "models": ["AudioX-South", "IndicConformer", "MMS", "Shuka"]
+        "models": ["AudioX-South", "IndicConformer", "MMS"]
     },
     "Telugu (తెలుగు)": {
         "code": "te",
         "script": "Telugu",
-        "models": ["AudioX-South", "IndicConformer", "MMS", "Shuka"] 
+        "models": ["AudioX-South", "IndicConformer", "MMS"] 
     },
     "Kannada (ಕನ್ನಡ)": {
         "code": "kn",
         "script": "Kannada",
-        "models": ["AudioX-South", "IndicConformer", "MMS", "Shuka"]
+        "models": ["AudioX-South", "IndicConformer", "MMS"]
     }
 }
 
@@ -75,13 +74,6 @@ MODEL_CONFIGS = {
         "model_type": "ctc", 
         "description": "Supports 1,400+ languages",
         "languages": ["hi", "gu", "mr", "ta", "te", "kn", "ml"]
-    },
-    "Shuka": {
-        "repo": "sarvamai/shuka_v1",
-        "model_type": "audio_llm",
-        "description": "Audio-LLM for Indic languages (transcription mode)",
-        "trust_remote_code": True,
-        "languages": ["hi", "gu", "mr", "ta", "te", "kn", "ml", "bn", "pa", "or", "as", "ur", "en"]
     },
 }
 
@@ -119,17 +111,6 @@ def load_model_and_processor(model_name):
             model = AutoModelForCTC.from_pretrained(repo)
             processor = AutoProcessor.from_pretrained(repo)
             return model, processor, model_type
-            
-        elif model_name == "Shuka":
-            # Load Shuka using pipeline for easier handling
-            print(f"Loading {model_name}... (this may take a few minutes)")
-            pipe = pipeline(
-                model=repo, 
-                trust_remote_code=True, 
-                device=0 if torch.cuda.is_available() else -1,
-                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32
-            )
-            return pipe, None, model_type
 
     except Exception as e:
         return None, None, f"Error loading model: {str(e)}"
@@ -217,27 +198,6 @@ def transcribe_audio(audio_file, selected_language, selected_models, reference_t
                             language=lang_code
                         )
                         transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
-                
-                elif model_name == "Shuka":
-                    # Shuka Audio-LLM processing in transcription mode
-                    turns = [
-                        {'role': 'system', 'content': 'You are a precise transcription assistant. Transcribe the audio exactly as spoken, maintaining original language and format. Do not translate, summarize, or add explanations - only provide the exact spoken text.'},
-                        {'role': 'user', 'content': '<|audio|>'}
-                    ]
-                    
-                    result = model({
-                        'audio': audio, 
-                        'turns': turns, 
-                        'sampling_rate': 16000
-                    }, max_new_tokens=512)
-                    
-                    # Extract transcription from result
-                    if isinstance(result, list) and len(result) > 0:
-                        transcription = result[0].get('generated_text', '').strip()
-                    elif isinstance(result, dict):
-                        transcription = result.get('generated_text', '').strip()
-                    else:
-                        transcription = str(result).strip()
                 
                 else:  # MMS
                     # Standard CTC processing for MMS
@@ -338,7 +298,7 @@ def create_interface():
                 
                 # Dynamic model selection based on language
                 model_selection = gr.CheckboxGroup(
-                    choices=["AudioX-North", "IndicConformer", "MMS", "Shuka"],
+                    choices=["AudioX-North", "IndicConformer", "MMS"],
                     label="🤖 Select Models",
                     value=["AudioX-North", "IndicConformer"],
                     interactive=True
@@ -427,21 +387,20 @@ def create_interface():
         ---
         ### 🔤 Language & Model Support Matrix
         
-        | Language | Script | AudioX-North | AudioX-South | IndicConformer | MMS | Shuka |
-        |----------|---------|-------------|-------------|---------------|-----|--------|
-        | Hindi | Devanagari | ✅ | ❌ | ✅ | ✅ | ✅ |
-        | Gujarati | Gujarati | ✅ | ❌ | ✅ | ✅ | ✅ |
-        | Marathi | Devanagari | ✅ | ❌ | ✅ | ✅ | ✅ |
-        | Tamil | Tamil | ❌ | ✅ | ✅ | ✅ | ✅ |
-        | Telugu | Telugu | ❌ | ✅ | ✅ | ✅ | ✅ |
-        | Kannada | Kannada | ❌ | ✅ | ✅ | ✅ | ✅ |
+        | Language | Script | AudioX-North | AudioX-South | IndicConformer | MMS |
+        |----------|---------|-------------|-------------|---------------|-----|
+        | Hindi | Devanagari | ✅ | ❌ | ✅ | ✅ |
+        | Gujarati | Gujarati | ✅ | ❌ | ✅ | ✅ |
+        | Marathi | Devanagari | ✅ | ❌ | ✅ | ✅ |
+        | Tamil | Tamil | ❌ | ✅ | ✅ | ✅ |
+        | Telugu | Telugu | ❌ | ✅ | ✅ | ✅ |
+        | Kannada | Kannada | ❌ | ✅ | ✅ | ✅ |
         
         ### 💡 Tips:
         - **Models auto-filter** based on selected language
         - **Reference Text**: Enable WER/CER calculation by providing ground truth
         - **Copy Results**: Export formatted results using the copy button
         - **Best Performance**: Use AudioX models for their specialized languages
-        - **Shuka Model**: Audio-LLM in transcription mode (may take longer to load)
         """)
     
     return iface
