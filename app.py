@@ -45,6 +45,11 @@ LANGUAGE_CONFIGS = {
         "code": "kn",
         "script": "Kannada",
         "models": ["AudioX-South", "IndicConformer", "MMS"]
+    },
+    "Malayalam (മലയാളം)": {
+        "code": "ml",
+        "script": "Malayalam",
+        "models": ["AudioX-South", "IndicConformer", "MMS"]
     }
 }
 
@@ -274,11 +279,11 @@ def create_interface():
         .copy-area { font-family: monospace; font-size: 12px; }
     """) as iface:
         gr.Markdown("""
-        # 🌏 Multilingual Speech-to-Text Benchmark
+        # 🌐 Multilingual Speech-to-Text Benchmark
         
-        Compare ASR models across **6 Indian Languages** with comprehensive metrics.
+        Compare ASR models across **7 Indian Languages** with comprehensive metrics.
         
-        **Supported Languages:** Hindi, Gujarati, Marathi, Tamil, Telugu, Kannada
+        **Supported Languages:** Hindi, Gujarati, Marathi, Tamil, Telugu, Kannada, Malayalam
         """)
         
         with gr.Row():
@@ -305,7 +310,7 @@ def create_interface():
                 )
                 
                 reference_input = gr.Textbox(
-                    label="📝 Reference Text (optional, paste supported)",
+                    label="📄 Reference Text (optional, paste supported)",
                     placeholder="Paste reference transcription here...",
                     lines=4,
                     interactive=True
@@ -385,7 +390,7 @@ def create_interface():
         # Language information display
         gr.Markdown("""
         ---
-        ### 🔤 Language & Model Support Matrix
+        ### 📤 Language & Model Support Matrix
         
         | Language | Script | AudioX-North | AudioX-South | IndicConformer | MMS |
         |----------|---------|-------------|-------------|---------------|-----|
@@ -395,6 +400,7 @@ def create_interface():
         | Tamil | Tamil | ❌ | ✅ | ✅ | ✅ |
         | Telugu | Telugu | ❌ | ✅ | ✅ | ✅ |
         | Kannada | Kannada | ❌ | ✅ | ✅ | ✅ |
+        | Malayalam | Malayalam | ❌ | ✅ | ✅ | ✅ |
         
         ### 💡 Tips:
         - **Models auto-filter** based on selected language
